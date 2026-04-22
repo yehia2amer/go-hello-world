@@ -1,0 +1,11 @@
+apiVersion: openchoreo.dev/v1alpha1
+metadata:
+  name: go-hello-world-workload
+endpoints:
+  - name: http-api
+    port: 8080
+    type: HTTP
+configurations:
+  env:
+    - name: HTTP_PORT
+      value: "8080"

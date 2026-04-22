@@ -1,0 +1,91 @@
+name: Build and Deploy to OpenChoreo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  NAMESPACE: default
+  PROJECT: extci-validation
+  COMPONENT: go-hello-world-extci
+  REGISTRY: europe-west1-docker.pkg.dev/pg-ae-n-app-173978/openchoreo
+  IMAGE_NAME: extci-validation-go-hello-world-extci-image
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE="${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA::7}"
+          docker build -f ./cmd/rest/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Get OpenChoreo access token
+        run: |
+          TOKEN=$(curl -sf -X POST "${{ secrets.THUNDER_URL }}/oauth2/token" \
+            -d "grant_type=client_credentials" \
+            -d "client_id=${{ secrets.OPENCHOREO_CLIENT_ID }}" \
+            -d "client_secret=${{ secrets.OPENCHOREO_CLIENT_SECRET }}" \
+            | jq -r '.access_token')
+          echo "::add-mask::$TOKEN"
+          echo "OC_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Create/update Workload via OpenChoreo API
+        run: |
+          WORKLOAD_JSON="{\"containers\":{\"main\":{\"image\":\"${IMAGE}\"}}}"
+
+          HTTP_CODE=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "${{ secrets.OPENCHOREO_API_URL }}/api/v1/namespaces/${NAMESPACE}/workloads" \
+            -H "Authorization: Bearer ${OC_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$WORKLOAD_JSON")
+
+          if [ "$HTTP_CODE" = "409" ]; then
+            echo "Workload exists, fetching actual name..."
+            WORKLOAD_NAME=$(curl -sf \
+              "${{ secrets.OPENCHOREO_API_URL }}/api/v1/namespaces/${NAMESPACE}/workloads?component=${COMPONENT}" \
+              -H "Authorization: Bearer ${OC_TOKEN}" \
+              | jq -r '.items[0].metadata.name // empty')
+
+            if [ -z "$WORKLOAD_NAME" ]; then
+              echo "Warning: Could not discover workload name, falling back to ${COMPONENT}-workload"
+              WORKLOAD_NAME="${COMPONENT}-workload"
+            fi
+
+            echo "Updating workload: $WORKLOAD_NAME"
+            curl -sf \
+              -X PUT "${{ secrets.OPENCHOREO_API_URL }}/api/v1/namespaces/${NAMESPACE}/workloads/${WORKLOAD_NAME}" \
+              -H "Authorization: Bearer ${OC_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$WORKLOAD_JSON"
+          elif [ "$HTTP_CODE" -ge 400 ]; then
+            echo "Error creating workload: HTTP $HTTP_CODE"
+            cat /tmp/response.json
+            exit 1
+          else
+            echo "Workload created successfully"
+          fi
+
+      - name: Verify deployment
+        run: |
+          echo "Workload submitted. OpenChoreo will handle deployment."
+          echo "Check status: kubectl get workloads -n ${NAMESPACE} -l openchoreo.dev/component=${COMPONENT}"
