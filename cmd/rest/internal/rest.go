@@ -45,21 +45,30 @@ func Main(pwd string, args []string, envs map[string]string, osSignal chan os.Si
 
 	//generate and create handle func, when connecting, it will use this port
 	//indicate via console that the webserver is starting
-	certFile, keyFile = envs[CERT_FILE], envs[KEY_FILE]
-	httpPort = envs[HTTP_PORT]
+	if v, ok := envs[CERT_FILE]; ok && v != "" {
+		certFile = v
+	}
+	if v, ok := envs[KEY_FILE]; ok && v != "" {
+		keyFile = v
+	}
+	if v, ok := envs[HTTP_PORT]; ok && v != "" {
+		httpPort = v
+	}
 	httpsEnabled, _ = strconv.ParseBool(envs[HTTPS_ENABLED])
 	http.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
 		fmt.Fprintln(writer, "Hello, World!")
 	})
-	tlsCertificate, err := GetCertificates()
-	if err != nil {
-		return err
-	}
 	server := &http.Server{
 		Addr: ":" + httpPort,
-		TLSConfig: &tls.Config{
+	}
+	if httpsEnabled {
+		tlsCertificate, err := GetCertificates()
+		if err != nil {
+			return err
+		}
+		server.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{tlsCertificate},
-		},
+		}
 	}
 	fmt.Printf("starting web server on :%s\n", httpPort)
 	stopped := make(chan struct{})
